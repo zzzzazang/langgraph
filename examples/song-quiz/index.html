@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>노래 N초 맞추기 게임</title>
+    <title>노래 N초 듣고 제목 맞추기 게임</title>
     <style>
       :root {
         font-family: "Noto Sans KR", system-ui, -apple-system, sans-serif;
@@ -15,15 +15,12 @@
         padding: 24px;
       }
       .container {
-        max-width: 840px;
+        max-width: 760px;
         margin: 0 auto;
         background: #fff;
         border-radius: 16px;
         box-shadow: 0 10px 25px rgba(15, 23, 42, 0.08);
         padding: 24px;
-      }
-      h1 {
-        margin-top: 0;
       }
       .row {
         display: flex;
@@ -38,74 +35,59 @@
         color: #fff;
         padding: 10px 14px;
         cursor: pointer;
-        font-size: 14px;
       }
       button:disabled {
-        cursor: not-allowed;
         opacity: 0.6;
+        cursor: not-allowed;
       }
       input[type="text"] {
         flex: 1;
-        min-width: 180px;
+        min-width: 200px;
         padding: 10px 12px;
         border-radius: 10px;
         border: 1px solid #d1d5db;
       }
       .panel {
-        margin-top: 18px;
+        margin-top: 16px;
         background: #f1f5f9;
         border-radius: 12px;
         padding: 14px;
       }
-      ul {
-        margin: 8px 0 0;
-        padding-left: 20px;
-      }
       .status {
         font-weight: 700;
-        margin-top: 6px;
       }
       .hint {
         color: #475569;
         font-size: 13px;
+      }
+      a {
+        color: #1d4ed8;
       }
     </style>
   </head>
   <body>
     <main class="container">
       <h1>노래 N초 듣고 제목 맞추기 게임</h1>
-      <p class="hint">
-        1단계(1초) → 2단계(2초) → 3단계(5초) → 4단계(10초) → 5단계(실패)
-      </p>
-
-      <div class="panel">
-        <label for="songUpload"><strong>노래 파일 업로드 (여러 개 선택 가능)</strong></label>
-        <div class="row">
-          <input id="songUpload" type="file" accept="audio/*" multiple />
-          <button id="startGameBtn" disabled>게임 시작</button>
-        </div>
-        <p class="hint">파일명(확장자 제외)이 정답으로 사용됩니다. 예: `벚꽃엔딩.mp3` → `벚꽃엔딩`</p>
-      </div>
+      <p class="hint">1단계(1초) → 2단계(2초) → 3단계(5초) → 4단계(10초) → 5단계(실패)</p>
+      <p class="hint">관리자 업로드 페이지: <a href="./admin.html">admin.html</a></p>
 
       <div class="panel">
         <p><strong>현재 문제:</strong> <span id="problemIndex">-</span></p>
         <p><strong>현재 단계:</strong> <span id="stageLabel">-</span></p>
-        <p class="status" id="statusText">노래를 업로드하고 게임 시작을 눌러주세요.</p>
+        <p id="statusText" class="status">관리자가 노래를 업로드한 뒤 게임 시작을 눌러주세요.</p>
         <div class="row">
+          <button id="startBtn">게임 시작</button>
           <button id="playBtn" disabled>재생</button>
           <input id="answerInput" type="text" placeholder="정답 제목 입력" disabled />
           <button id="submitBtn" disabled>정답 제출</button>
           <button id="nextBtn" disabled>다음 문제</button>
         </div>
       </div>
-
-      <div class="panel">
-        <strong>업로드된 노래 목록</strong>
-        <ul id="songList"></ul>
-      </div>
     </main>
 
     <script>
+      const DB_NAME = "song-quiz-db";
+      const STORE_NAME = "songs";
       const STAGES = [
         { label: "1단계", seconds: 1 },
         { label: "2단계", seconds: 2 },
@@ -113,8 +95,7 @@
         { label: "4단계", seconds: 10 },
       ];
 
-      const songUpload = document.getElementById("songUpload");
-      const startGameBtn = document.getElementById("startGameBtn");
+      const startBtn = document.getElementById("startBtn");
       const playBtn = document.getElementById("playBtn");
       const answerInput = document.getElementById("answerInput");
       const submitBtn = document.getElementById("submitBtn");
@@ -122,28 +103,102 @@
       const statusText = document.getElementById("statusText");
       const stageLabel = document.getElementById("stageLabel");
       const problemIndex = document.getElementById("problemIndex");
-      const songList = document.getElementById("songList");
 
       const audio = new Audio();
+      let clipTimeout = null;
       let songs = [];
       let currentSongIdx = 0;
       let currentStageIdx = 0;
       let gameStarted = false;
+      let currentSongUrl = "";
 
-      const getAnswerFromName = (filename) => filename.replace(/\.[^/.]+$/, "").trim().toLowerCase();
+      const normalizeText = (value) =>
+        (value || "")
+          .toLowerCase()
+          .replace(/\.[^/.]+$/, "")
+          .replace(/\s+/g, "")
+          .replace(/[^\p{L}\p{N}]/gu, "")
+          .trim();
 
-      const updateSongList = () => {
-        songList.innerHTML = "";
-        songs.forEach((song, idx) => {
-          const li = document.createElement("li");
-          li.textContent = `${idx + 1}. ${song.file.name}`;
-          songList.appendChild(li);
+      const levenshteinDistance = (a, b) => {
+        const rows = a.length + 1;
+        const cols = b.length + 1;
+        const matrix = Array.from({ length: rows }, () => Array(cols).fill(0));
+
+        for (let i = 0; i < rows; i += 1) matrix[i][0] = i;
+        for (let j = 0; j < cols; j += 1) matrix[0][j] = j;
+
+        for (let i = 1; i < rows; i += 1) {
+          for (let j = 1; j < cols; j += 1) {
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            matrix[i][j] = Math.min(
+              matrix[i - 1][j] + 1,
+              matrix[i][j - 1] + 1,
+              matrix[i - 1][j - 1] + cost
+            );
+          }
+        }
+        return matrix[a.length][b.length];
+      };
+
+      const similarity = (a, b) => {
+        const left = normalizeText(a);
+        const right = normalizeText(b);
+        if (!left || !right) return 0;
+        if (left === right) return 1;
+        const maxLen = Math.max(left.length, right.length);
+        const dist = levenshteinDistance(left, right);
+        return 1 - dist / maxLen;
+      };
+
+      const openDb = () =>
+        new Promise((resolve, reject) => {
+          const req = indexedDB.open(DB_NAME, 1);
+          req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+              db.createObjectStore(STORE_NAME, { keyPath: "id", autoIncrement: true });
+            }
+          };
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+
+      const loadSongs = async () => {
+        const db = await openDb();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, "readonly");
+          const store = tx.objectStore(STORE_NAME);
+          const req = store.getAll();
+          req.onsuccess = () => {
+            resolve(
+              req.result.map((record) => ({
+                id: record.id,
+                answer: normalizeText(record.name),
+                displayName: record.name,
+                blob: record.blob,
+              }))
+            );
+          };
+          req.onerror = () => reject(req.error);
         });
       };
 
+      const stopAndResetAudio = () => {
+        if (clipTimeout) {
+          clearTimeout(clipTimeout);
+          clipTimeout = null;
+        }
+        audio.pause();
+        audio.currentTime = 0;
+        if (currentSongUrl) {
+          URL.revokeObjectURL(currentSongUrl);
+          currentSongUrl = "";
+        }
+        audio.src = "";
+      };
+
       const updateUI = () => {
-        const hasSongs = songs.length > 0;
-        startGameBtn.disabled = !hasSongs;
         const hasCurrentSong = gameStarted && currentSongIdx < songs.length;
         playBtn.disabled = !hasCurrentSong;
         answerInput.disabled = !hasCurrentSong;
@@ -152,7 +207,7 @@
 
         if (!hasCurrentSong) {
           stageLabel.textContent = "-";
-          problemIndex.textContent = hasSongs ? `${currentSongIdx + 1}/${songs.length}` : "-";
+          problemIndex.textContent = songs.length ? `${Math.min(currentSongIdx + 1, songs.length)}/${songs.length}` : "-";
           return;
         }
 
@@ -161,97 +216,84 @@
         problemIndex.textContent = `${currentSongIdx + 1}/${songs.length}`;
       };
 
-      const playStageClip = async () => {
+      const playCurrentStage = async () => {
         const song = songs[currentSongIdx];
         const stage = STAGES[currentStageIdx];
         if (!song || !stage) return;
 
-        audio.pause();
-        audio.src = song.url;
-        audio.currentTime = 0;
+        stopAndResetAudio();
+        currentSongUrl = URL.createObjectURL(song.blob);
+        audio.src = currentSongUrl;
 
         try {
           await audio.play();
-          setTimeout(() => {
+          clipTimeout = setTimeout(() => {
             audio.pause();
             audio.currentTime = 0;
           }, stage.seconds * 1000);
-          statusText.textContent = `${stage.label}: ${stage.seconds}초 재생됨. 정답을 입력하세요.`;
+          statusText.textContent = `${stage.label} ${stage.seconds}초 재생됨. 정답을 입력하세요.`;
         } catch {
-          statusText.textContent = "브라우저 정책으로 자동 재생이 막혔습니다. 다시 재생 버튼을 눌러주세요.";
+          statusText.textContent = "재생이 차단되었습니다. 다시 재생 버튼을 눌러주세요.";
         }
       };
 
       const moveToNextQuestion = () => {
-        audio.pause();
-        audio.currentTime = 0;
-        audio.src = "";
-
+        stopAndResetAudio();
         currentSongIdx += 1;
         currentStageIdx = 0;
         answerInput.value = "";
 
         if (currentSongIdx >= songs.length) {
           gameStarted = false;
-          statusText.textContent = "모든 문제 완료! 다시 파일을 업로드해 새 게임을 시작할 수 있습니다.";
+          statusText.textContent = "모든 문제가 끝났습니다! 게임 시작을 눌러 다시 진행할 수 있습니다.";
           updateUI();
           return;
         }
 
-        statusText.textContent = "다음 문제입니다. 재생 버튼을 눌러 들어보세요.";
+        statusText.textContent = "다음 문제입니다. 재생 버튼을 누르세요.";
         updateUI();
       };
 
-      const failCurrentQuestion = () => {
-        const answer = songs[currentSongIdx].answer;
-        statusText.textContent = `5단계 실패! 정답은 '${answer}' 입니다. 다음 문제로 넘어가세요.`;
+      const markFail = () => {
+        const answer = songs[currentSongIdx].displayName;
+        statusText.textContent = `5단계 실패! 정답은 '${answer}' 입니다. 다음 문제를 눌러주세요.`;
         playBtn.disabled = true;
         answerInput.disabled = true;
         submitBtn.disabled = true;
         nextBtn.disabled = false;
       };
 
-      songUpload.addEventListener("change", () => {
-        const files = Array.from(songUpload.files || []);
-        songs.forEach((song) => URL.revokeObjectURL(song.url));
-        songs = files.map((file) => ({
-          file,
-          url: URL.createObjectURL(file),
-          answer: getAnswerFromName(file.name),
-        }));
-        currentSongIdx = 0;
-        currentStageIdx = 0;
-        gameStarted = false;
-        updateSongList();
-        statusText.textContent = songs.length
-          ? "업로드 완료. 게임 시작 버튼을 눌러주세요."
-          : "노래를 업로드하고 게임 시작을 눌러주세요.";
-        updateUI();
-      });
+      startBtn.addEventListener("click", async () => {
+        songs = await loadSongs();
+        if (!songs.length) {
+          statusText.textContent = "업로드된 노래가 없습니다. 관리자 페이지에서 먼저 업로드해주세요.";
+          updateUI();
+          return;
+        }
 
-      startGameBtn.addEventListener("click", () => {
-        if (!songs.length) return;
+        stopAndResetAudio();
         gameStarted = true;
         currentSongIdx = 0;
         currentStageIdx = 0;
         answerInput.value = "";
-        statusText.textContent = "1번 문제 시작! 재생 버튼을 눌러 들어보세요.";
+        statusText.textContent = "게임 시작! 재생 버튼을 눌러 첫 문제를 들어보세요.";
         updateUI();
       });
 
-      playBtn.addEventListener("click", playStageClip);
+      playBtn.addEventListener("click", playCurrentStage);
 
       submitBtn.addEventListener("click", () => {
-        const userAnswer = answerInput.value.trim().toLowerCase();
-        const correctAnswer = songs[currentSongIdx].answer;
+        const song = songs[currentSongIdx];
+        const answer = answerInput.value;
 
-        if (!userAnswer) {
+        if (!answer.trim()) {
           statusText.textContent = "정답을 입력해주세요.";
           return;
         }
 
-        if (userAnswer === correctAnswer) {
-          statusText.textContent = "정답입니다! 다음 문제로 넘어가세요.";
+        const score = similarity(answer, song.answer);
+        if (score >= 0.99) {
+          statusText.textContent = `정답입니다! (유사도 ${(score * 100).toFixed(1)}%) 다음 문제를 눌러주세요.`;
           playBtn.disabled = true;
           answerInput.disabled = true;
           submitBtn.disabled = true;
@@ -263,7 +305,7 @@
         answerInput.value = "";
 
         if (currentStageIdx >= STAGES.length) {
-          failCurrentQuestion();
+          markFail();
           return;
         }
 
