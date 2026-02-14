@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>노래 N초 듣고 제목 맞추기 게임</title>
+    <style>
+      :root {
+        font-family: "Noto Sans KR", system-ui, -apple-system, sans-serif;
+        color: #1f2937;
+        background: #f8fafc;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+      }
+      .container {
+        max-width: 760px;
+        margin: 0 auto;
+        background: #fff;
+        border-radius: 16px;
+        box-shadow: 0 10px 25px rgba(15, 23, 42, 0.08);
+        padding: 24px;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin: 12px 0;
+      }
+      button {
+        border: 0;
+        border-radius: 10px;
+        background: #2563eb;
+        color: #fff;
+        padding: 10px 14px;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      input[type="text"] {
+        flex: 1;
+        min-width: 200px;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid #d1d5db;
+      }
+      .panel {
+        margin-top: 16px;
+        background: #f1f5f9;
+        border-radius: 12px;
+        padding: 14px;
+      }
+      .status {
+        font-weight: 700;
+      }
+      .hint {
+        color: #475569;
+        font-size: 13px;
+      }
+      a {
+        color: #1d4ed8;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="container">
+      <h1>노래 N초 듣고 제목 맞추기 게임</h1>
+      <p class="hint">1단계(1초) → 2단계(2초) → 3단계(5초) → 4단계(10초) → 5단계(실패)</p>
+      <p class="hint">관리자 업로드 페이지: <a href="./admin.html">admin.html</a></p>
+
+      <div class="panel">
+        <p><strong>현재 문제:</strong> <span id="problemIndex">-</span></p>
+        <p><strong>현재 단계:</strong> <span id="stageLabel">-</span></p>
+        <p id="statusText" class="status">관리자가 노래를 업로드한 뒤 게임 시작을 눌러주세요.</p>
+        <div class="row">
+          <button id="startBtn">게임 시작</button>
+          <button id="playBtn" disabled>재생</button>
+          <input id="answerInput" type="text" placeholder="정답 제목 입력" disabled />
+          <button id="submitBtn" disabled>정답 제출</button>
+          <button id="nextBtn" disabled>다음 문제</button>
+        </div>
+      </div>
+    </main>
+
+    <script>
+      const DB_NAME = "song-quiz-db";
+      const STORE_NAME = "songs";
+      const STAGES = [
+        { label: "1단계", seconds: 1 },
+        { label: "2단계", seconds: 2 },
+        { label: "3단계", seconds: 5 },
+        { label: "4단계", seconds: 10 },
+      ];
+
+      const startBtn = document.getElementById("startBtn");
+      const playBtn = document.getElementById("playBtn");
+      const answerInput = document.getElementById("answerInput");
+      const submitBtn = document.getElementById("submitBtn");
+      const nextBtn = document.getElementById("nextBtn");
+      const statusText = document.getElementById("statusText");
+      const stageLabel = document.getElementById("stageLabel");
+      const problemIndex = document.getElementById("problemIndex");
+
+      const audio = new Audio();
+      let clipTimeout = null;
+      let songs = [];
+      let currentSongIdx = 0;
+      let currentStageIdx = 0;
+      let gameStarted = false;
+      let currentSongUrl = "";
+
+      const normalizeText = (value) =>
+        (value || "")
+          .toLowerCase()
+          .replace(/\.[^/.]+$/, "")
+          .replace(/\s+/g, "")
+          .replace(/[^\p{L}\p{N}]/gu, "")
+          .trim();
+
+      const levenshteinDistance = (a, b) => {
+        const rows = a.length + 1;
+        const cols = b.length + 1;
+        const matrix = Array.from({ length: rows }, () => Array(cols).fill(0));
+
+        for (let i = 0; i < rows; i += 1) matrix[i][0] = i;
+        for (let j = 0; j < cols; j += 1) matrix[0][j] = j;
+
+        for (let i = 1; i < rows; i += 1) {
+          for (let j = 1; j < cols; j += 1) {
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            matrix[i][j] = Math.min(
+              matrix[i - 1][j] + 1,
+              matrix[i][j - 1] + 1,
+              matrix[i - 1][j - 1] + cost
+            );
+          }
+        }
+        return matrix[a.length][b.length];
+      };
+
+      const similarity = (a, b) => {
+        const left = normalizeText(a);
+        const right = normalizeText(b);
+        if (!left || !right) return 0;
+        if (left === right) return 1;
+        const maxLen = Math.max(left.length, right.length);
+        const dist = levenshteinDistance(left, right);
+        return 1 - dist / maxLen;
+      };
+
+      const openDb = () =>
+        new Promise((resolve, reject) => {
+          const req = indexedDB.open(DB_NAME, 1);
+          req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+              db.createObjectStore(STORE_NAME, { keyPath: "id", autoIncrement: true });
+            }
+          };
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+
+      const loadSongs = async () => {
+        const db = await openDb();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, "readonly");
+          const store = tx.objectStore(STORE_NAME);
+          const req = store.getAll();
+          req.onsuccess = () => {
+            resolve(
+              req.result.map((record) => ({
+                id: record.id,
+                answer: normalizeText(record.name),
+                displayName: record.name,
+                blob: record.blob,
+              }))
+            );
+          };
+          req.onerror = () => reject(req.error);
+        });
+      };
+
+      const stopAndResetAudio = () => {
+        if (clipTimeout) {
+          clearTimeout(clipTimeout);
+          clipTimeout = null;
+        }
+        audio.pause();
+        audio.currentTime = 0;
+        if (currentSongUrl) {
+          URL.revokeObjectURL(currentSongUrl);
+          currentSongUrl = "";
+        }
+        audio.src = "";
+      };
+
+      const updateUI = () => {
+        const hasCurrentSong = gameStarted && currentSongIdx < songs.length;
+        playBtn.disabled = !hasCurrentSong;
+        answerInput.disabled = !hasCurrentSong;
+        submitBtn.disabled = !hasCurrentSong;
+        nextBtn.disabled = true;
+
+        if (!hasCurrentSong) {
+          stageLabel.textContent = "-";
+          problemIndex.textContent = songs.length ? `${Math.min(currentSongIdx + 1, songs.length)}/${songs.length}` : "-";
+          return;
+        }
+
+        const stage = STAGES[currentStageIdx];
+        stageLabel.textContent = `${stage.label} (${stage.seconds}초)`;
+        problemIndex.textContent = `${currentSongIdx + 1}/${songs.length}`;
+      };
+
+      const playCurrentStage = async () => {
+        const song = songs[currentSongIdx];
+        const stage = STAGES[currentStageIdx];
+        if (!song || !stage) return;
+
+        stopAndResetAudio();
+        currentSongUrl = URL.createObjectURL(song.blob);
+        audio.src = currentSongUrl;
+
+        try {
+          await audio.play();
+          clipTimeout = setTimeout(() => {
+            audio.pause();
+            audio.currentTime = 0;
+          }, stage.seconds * 1000);
+          statusText.textContent = `${stage.label} ${stage.seconds}초 재생됨. 정답을 입력하세요.`;
+        } catch {
+          statusText.textContent = "재생이 차단되었습니다. 다시 재생 버튼을 눌러주세요.";
+        }
+      };
+
+      const moveToNextQuestion = () => {
+        stopAndResetAudio();
+        currentSongIdx += 1;
+        currentStageIdx = 0;
+        answerInput.value = "";
+
+        if (currentSongIdx >= songs.length) {
+          gameStarted = false;
+          statusText.textContent = "모든 문제가 끝났습니다! 게임 시작을 눌러 다시 진행할 수 있습니다.";
+          updateUI();
+          return;
+        }
+
+        statusText.textContent = "다음 문제입니다. 재생 버튼을 누르세요.";
+        updateUI();
+      };
+
+      const markFail = () => {
+        const answer = songs[currentSongIdx].displayName;
+        statusText.textContent = `5단계 실패! 정답은 '${answer}' 입니다. 다음 문제를 눌러주세요.`;
+        playBtn.disabled = true;
+        answerInput.disabled = true;
+        submitBtn.disabled = true;
+        nextBtn.disabled = false;
+      };
+
+      startBtn.addEventListener("click", async () => {
+        songs = await loadSongs();
+        if (!songs.length) {
+          statusText.textContent = "업로드된 노래가 없습니다. 관리자 페이지에서 먼저 업로드해주세요.";
+          updateUI();
+          return;
+        }
+
+        stopAndResetAudio();
+        gameStarted = true;
+        currentSongIdx = 0;
+        currentStageIdx = 0;
+        answerInput.value = "";
+        statusText.textContent = "게임 시작! 재생 버튼을 눌러 첫 문제를 들어보세요.";
+        updateUI();
+      });
+
+      playBtn.addEventListener("click", playCurrentStage);
+
+      submitBtn.addEventListener("click", () => {
+        const song = songs[currentSongIdx];
+        const answer = answerInput.value;
+
+        if (!answer.trim()) {
+          statusText.textContent = "정답을 입력해주세요.";
+          return;
+        }
+
+        const score = similarity(answer, song.answer);
+        if (score >= 0.99) {
+          statusText.textContent = `정답입니다! (유사도 ${(score * 100).toFixed(1)}%) 다음 문제를 눌러주세요.`;
+          playBtn.disabled = true;
+          answerInput.disabled = true;
+          submitBtn.disabled = true;
+          nextBtn.disabled = false;
+          return;
+        }
+
+        currentStageIdx += 1;
+        answerInput.value = "";
+
+        if (currentStageIdx >= STAGES.length) {
+          markFail();
+          return;
+        }
+
+        const stage = STAGES[currentStageIdx];
+        stageLabel.textContent = `${stage.label} (${stage.seconds}초)`;
+        statusText.textContent = `오답입니다. ${stage.label}로 진행합니다.`;
+      });
+
+      nextBtn.addEventListener("click", moveToNextQuestion);
+    </script>
+  </body>
+</html>

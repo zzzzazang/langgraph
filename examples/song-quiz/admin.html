@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>노래 퀴즈 관리자 페이지</title>
+    <style>
+      body {
+        font-family: "Noto Sans KR", system-ui, sans-serif;
+        background: #f8fafc;
+        color: #1f2937;
+        margin: 0;
+        padding: 24px;
+      }
+      .container {
+        max-width: 760px;
+        margin: 0 auto;
+        background: #fff;
+        border-radius: 16px;
+        box-shadow: 0 10px 25px rgba(15, 23, 42, 0.08);
+        padding: 24px;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin: 10px 0;
+      }
+      button {
+        border: 0;
+        background: #2563eb;
+        color: #fff;
+        border-radius: 10px;
+        padding: 10px 14px;
+        cursor: pointer;
+      }
+      ul {
+        margin-top: 12px;
+      }
+      a {
+        color: #1d4ed8;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="container">
+      <h1>노래 퀴즈 관리자 페이지</h1>
+      <p>여기서 업로드한 곡이 게임 페이지 문제로 사용됩니다.</p>
+      <p><a href="./index.html">게임 페이지로 이동</a></p>
+
+      <div class="row">
+        <input id="songUpload" type="file" accept="audio/*" multiple />
+        <button id="saveBtn">업로드 저장</button>
+        <button id="clearBtn">전체 삭제</button>
+      </div>
+
+      <p id="status">업로드할 파일을 선택하세요.</p>
+      <h3>현재 저장된 노래</h3>
+      <ul id="savedList"></ul>
+    </main>
+
+    <script>
+      const DB_NAME = "song-quiz-db";
+      const STORE_NAME = "songs";
+
+      const songUpload = document.getElementById("songUpload");
+      const saveBtn = document.getElementById("saveBtn");
+      const clearBtn = document.getElementById("clearBtn");
+      const status = document.getElementById("status");
+      const savedList = document.getElementById("savedList");
+
+      const openDb = () =>
+        new Promise((resolve, reject) => {
+          const req = indexedDB.open(DB_NAME, 1);
+          req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+              db.createObjectStore(STORE_NAME, { keyPath: "id", autoIncrement: true });
+            }
+          };
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+
+      const getAllSongs = async () => {
+        const db = await openDb();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, "readonly");
+          const store = tx.objectStore(STORE_NAME);
+          const req = store.getAll();
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+      };
+
+      const refreshList = async () => {
+        const songs = await getAllSongs();
+        savedList.innerHTML = "";
+        if (!songs.length) {
+          const li = document.createElement("li");
+          li.textContent = "저장된 노래가 없습니다.";
+          savedList.appendChild(li);
+          return;
+        }
+
+        songs.forEach((song, idx) => {
+          const li = document.createElement("li");
+          li.textContent = `${idx + 1}. ${song.name}`;
+          savedList.appendChild(li);
+        });
+      };
+
+      const clearSongs = async () => {
+        const db = await openDb();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, "readwrite");
+          const store = tx.objectStore(STORE_NAME);
+          const req = store.clear();
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error);
+        });
+      };
+
+      const saveFiles = async (files) => {
+        const db = await openDb();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, "readwrite");
+          const store = tx.objectStore(STORE_NAME);
+
+          files.forEach((file) => {
+            store.add({ name: file.name, blob: file });
+          });
+
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      };
+
+      saveBtn.addEventListener("click", async () => {
+        const files = Array.from(songUpload.files || []);
+        if (!files.length) {
+          status.textContent = "파일을 먼저 선택해주세요.";
+          return;
+        }
+
+        await saveFiles(files);
+        status.textContent = `${files.length}개 파일 저장 완료.`;
+        songUpload.value = "";
+        await refreshList();
+      });
+
+      clearBtn.addEventListener("click", async () => {
+        await clearSongs();
+        status.textContent = "모든 노래를 삭제했습니다.";
+        await refreshList();
+      });
+
+      refreshList();
+    </script>
+  </body>
+</html>
