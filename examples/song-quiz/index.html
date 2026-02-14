@@ -73,7 +73,7 @@
   </head>
   <body>
     <main class="container">
-      <h1>노래 N초만 듣고 제목 맞추기</h1>
+      <h1>노래 N초 듣고 제목 맞추기 게임</h1>
       <p class="hint">
         1단계(1초) → 2단계(2초) → 3단계(5초) → 4단계(10초) → 5단계(실패)
       </p>
@@ -183,6 +183,10 @@
       };
 
       const moveToNextQuestion = () => {
+        audio.pause();
+        audio.currentTime = 0;
+        audio.src = "";
+
         currentSongIdx += 1;
         currentStageIdx = 0;
         answerInput.value = "";
